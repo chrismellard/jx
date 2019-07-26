@@ -21,7 +21,6 @@ import (
 	jenkinsv1 "github.com/jenkins-x/jx/pkg/apis/jenkins.io/v1"
 	"github.com/jenkins-x/jx/pkg/cloud"
 	"github.com/jenkins-x/jx/pkg/cloud/gke"
-	"github.com/jenkins-x/jx/pkg/cloud/gke/externaldns"
 	"github.com/jenkins-x/jx/pkg/gits"
 	"github.com/jenkins-x/jx/pkg/helm"
 	"github.com/jenkins-x/jx/pkg/kube"
@@ -1924,7 +1923,7 @@ func (o *CommonOptions) installExternalDNSGKE() error {
 	o.NameServers = nameServers
 
 	var gcpServiceAccountSecretName string
-	gcpServiceAccountSecretName, err = externaldns.CreateExternalDNSGCPServiceAccount(o.GCloud(), client,
+	gcpServiceAccountSecretName, err = o.CloudProvider.ExternalDNS.CreateExternalDNSServiceAccount(o.CloudProvider.ProviderCLI, client,
 		kube.DefaultExternalDNSReleaseName, devNamespace, clusterName, googleProjectID)
 	if err != nil {
 		return errors.Wrap(err, "failed to create service account for ExternalDNS")

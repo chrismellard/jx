@@ -2,7 +2,9 @@ package opts
 
 import (
 	"fmt"
+	"github.com/jenkins-x/jx/pkg/cloud"
 	"github.com/jenkins-x/jx/pkg/cloud/gke"
+	"github.com/jenkins-x/jx/pkg/cloud/gke/externaldns"
 	"github.com/spf13/viper"
 	"io"
 	"os"
@@ -96,10 +98,16 @@ type ModifyDevEnvironmentFn func(callback func(env *jenkinsv1.Environment) error
 // ModifyEnvironmentFn a callback to create/update an Environment
 type ModifyEnvironmentFn func(name string, callback func(env *jenkinsv1.Environment) error) error
 
+type CloudProvider struct {
+	Provider    string
+	ProviderCLI cloud.CloudProvider
+	ExternalDNS cloud.ExternalDNS
+}
+
 // CommonOptions contains common options and helper methods
 type CommonOptions struct {
 	Prow
-
+	CloudProvider
 	Args                   []string
 	BatchMode              bool
 	Cmd                    *cobra.Command
@@ -1248,4 +1256,13 @@ func (o *CommonOptions) configExists(configPath, configKey string) bool {
 		return true
 	}
 	return viper.InConfig(configKey)
+}
+
+func (o *CommonOptions) ConfigureCloudProviderServices(provider string) {
+	switch provider {
+	case cloud.GKE:
+		o.CloudProvider.ProviderCLI = &gke.GKEProvider{}
+		o.CloudProvider.ExternalDNS = &externaldns.GKEExternalDNS{}
+	}
+	return
 }

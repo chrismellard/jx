@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jenkins-x/jx/pkg/cloud/gke"
-	"github.com/jenkins-x/jx/pkg/cloud/gke/externaldns"
 	"github.com/jenkins-x/jx/pkg/config"
 	"github.com/jenkins-x/jx/pkg/kube"
 	"github.com/jenkins-x/jx/pkg/util"
@@ -88,6 +86,7 @@ func NewCmdStepCreateInstallValues(commonOpts *opts.CommonOptions) *cobra.Comman
 	cmd.Flags().StringVarP(&options.ExternalIP, "external-ip", "", "", "The external IP used to access ingress endpoints from outside the Kubernetes cluster. For bare metal on premise clusters this is often the IP of the Kubernetes master. For cloud installations this is often the external IP of the ingress LoadBalancer.")
 	cmd.Flags().StringVarP(&options.Provider, "provider", "", "", "Cloud service providing the Kubernetes cluster.  Supported providers: "+cloud.KubernetesProviderOptions())
 	cmd.Flags().StringVarP(&options.LazyCreateFlag, "lazy-create", "", "", fmt.Sprintf("Specify true/false as to whether to lazily create missing resources. If not specified it is enabled if Terraform is not specified in the %s file", config.RequirementsConfigFileName))
+
 	return cmd
 }
 
@@ -125,6 +124,8 @@ func (o *StepCreateInstallValuesOptions) Run() error {
 		log.Logger().Warnf("No provider configured\n")
 	}
 
+	o.ConfigureCloudProviderServices(requirements.Cluster.Provider)
+
 	if requirements.Ingress.Domain == "" {
 		err = o.discoverIngressDomain(requirements, requirementsFileName)
 		if err != nil {
@@ -132,10 +133,10 @@ func (o *StepCreateInstallValuesOptions) Run() error {
 		}
 	}
 
-	// if we're using GKE and folks have provided a domain, i.e. we're  not using the Jenkins X default nip.io
+	// if we're using a boot enabled provider and folks have provided a domain, i.e. we're  not using the Jenkins X default nip.io
 	// then let's enable external dns automatically.
-	if requirements.Ingress.Domain != "" && !requirements.Ingress.IsAutoDNSDomain() && requirements.Cluster.Provider == cloud.GKE {
-		log.Logger().Info("using a custom domain and GKE so enabling external dns, you can also now enable TLS")
+	if requirements.Ingress.Domain != "" && !requirements.Ingress.IsAutoDNSDomain() && cloud.BootEnabledProviders[requirements.Cluster.Provider] {
+		log.Logger().Info("using a custom domain and enabled provider so enabling external dns, you can also now enable TLS")
 		requirements.Ingress.ExternalDNS = true
 		log.Logger().Infof("validating the external-dns secret in namespace %s\n", info(ns))
 
@@ -144,39 +145,39 @@ func (o *StepCreateInstallValuesOptions) Run() error {
 			return errors.Wrap(err, "creating kubernetes client")
 		}
 
-		serviceAccountName := gke.GcpServiceAccountSecretName(kube.DefaultExternalDNSReleaseName)
-
-		err = kube.ValidateSecret(kubeClient, serviceAccountName, externaldns.ServiceAccountSecretKey, ns)
+		serviceAccountName := o.CloudProvider.ProviderCLI.GenerateServiceAccountSecretName(kube.DefaultExternalDNSReleaseName)
+		err = kube.ValidateSecret(kubeClient, serviceAccountName, o.CloudProvider.ExternalDNS.GetServiceAccountSecretKey(), ns)
 
 		if err != nil {
 			if o.LazyCreate {
 
 				log.Logger().Infof("attempting to lazily create the external-dns secret %s\n", info(ns))
 
-				_, err = externaldns.CreateExternalDNSGCPServiceAccount(o.GCloud(), kubeClient, kube.DefaultExternalDNSReleaseName, ns, requirements.Cluster.ClusterName, requirements.Cluster.ProjectID)
+				_, err = o.CloudProvider.ExternalDNS.CreateExternalDNSServiceAccount(o.CloudProvider.ProviderCLI, kubeClient,
+					kube.DefaultExternalDNSReleaseName, ns, requirements.Cluster.ClusterName, requirements.Cluster.ProjectID)
 				if err != nil {
-					return errors.Wrap(err, "creating the ExternalDNS GCP Service Account")
+					return errors.Wrap(err, "creating the ExternalDNS Service Account")
 				}
 				// lets rerun the verify step to ensure its all sorted now
-				err = kube.ValidateSecret(kubeClient, serviceAccountName, externaldns.ServiceAccountSecretKey, ns)
+				err = kube.ValidateSecret(kubeClient, serviceAccountName, o.CloudProvider.ExternalDNS.GetServiceAccountSecretKey(), ns)
 			}
 		}
 		if err != nil {
 			return errors.Wrap(err, "validating external-dns secret")
 		}
 
-		err = o.GCloud().EnableAPIs(requirements.Cluster.ProjectID, "dns")
+		err = o.CloudProvider.ProviderCLI.EnableAPIs(requirements.Cluster.ProjectID, "dns")
 		if err != nil {
 			return errors.Wrap(err, "unable to enable 'dns' api")
 		}
 	} else {
-		log.Logger().Info("Disabling using external-dns as it currently only works on GKE and not nip.io domains")
+		log.Logger().Info("Disabling using external-dns as it currently only works on enabled cloud providers and not nip.io domains")
 		requirements.Ingress.ExternalDNS = false
 	}
 	// TLS uses cert-manager to ask LetsEncrypt for a signed certificate
 	if requirements.Ingress.TLS.Enabled {
-		if requirements.Cluster.Provider != cloud.GKE {
-			return errors.New("TLS is currently only supported on Google Container Engine")
+		if !cloud.BootEnabledProviders[requirements.Cluster.Provider] {
+			return errors.New("TLS is currently not supported for " + requirements.Cluster.Provider)
 		}
 
 		if strings.Contains(requirements.Ingress.Domain, "nip.io") {
