@@ -3,6 +3,9 @@ package aks
 import (
 	b64 "encoding/base64"
 	"encoding/json"
+	"fmt"
+	"github.com/pkg/errors"
+	"regexp"
 	"strings"
 
 	"github.com/jenkins-x/jx-logging/pkg/log"
@@ -28,6 +31,10 @@ type acr struct {
 	Name  string `json:"name"`
 }
 
+type containerExists struct {
+	Exists bool `json:"exists"`
+}
+
 type password struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -45,6 +52,16 @@ type auth struct {
 type config struct {
 	Auths map[string]*auth `json:"auths,omitempty"`
 }
+
+type AzureStorage interface {
+	ContainerExists(bucketUrl string) (bool, error)
+	CreateContainer(bucketUrl string) error
+	GetStorageAccessKey(storageAccount string) (string, error)
+}
+
+var (
+	azureContainerUriRegExp = regexp.MustCompile(`https://(?P<first>\w+)\.blob\.core\.windows\.net/(?P<second>\w+)`)
+)
 
 // NewAzureRunnerWithCommander specific the command runner for Azure CLI.
 func NewAzureRunnerWithCommander(runner util.Commander) *AzureRunner {
@@ -241,4 +258,107 @@ func (az *AzureRunner) azureCLI(args ...string) (string, error) {
 	az.Runner.SetName("az")
 	az.Runner.SetArgs(args)
 	return az.Runner.RunWithoutRetry()
+}
+
+func parseContainerUrl(bucketUrl string) (string, string, error) {
+	match := azureContainerUriRegExp.FindStringSubmatch(bucketUrl)
+	if len(match) == 3 {
+		return match[1], match[2], nil
+	}
+	return "", "", errors.New(fmt.Sprintf("Azure Blob Container Url %s could not be parsed to determine storage account and container name", bucketUrl))
+}
+
+// ContainerExists checks if an Azure Storage Container exists
+func (az *AzureRunner) ContainerExists(bucketUrl string) (bool, error) {
+	storageAccount, bucketName, err := parseContainerUrl(bucketUrl)
+	if err != nil {
+		return false, err
+	}
+
+	accessKey, err := az.GetStorageAccessKey(storageAccount)
+	if err != nil {
+		return false, err
+	}
+
+	bucketExistsArgs := []string{
+		"storage",
+		"container",
+		"exists",
+		"-n",
+		bucketName,
+		"--account-name",
+		storageAccount,
+		"--account-key",
+		accessKey,
+	}
+
+	cmdResult, err := az.azureCLI(bucketExistsArgs...)
+
+	if err != nil {
+		log.Logger().Infof("Error checking bucket exists: %s, %s", cmdResult, err)
+		return false, err
+	}
+
+	containerExists := containerExists{}
+	err = json.Unmarshal([]byte(cmdResult), &containerExists)
+	if err != nil {
+		return false, errors.Wrap(err, "unmarshalling Azure container exists command")
+	}
+	return containerExists.Exists, nil
+
+}
+
+func (az *AzureRunner) CreateContainer(bucketUrl string) error {
+	storageAccount, bucketName, err := parseContainerUrl(bucketUrl)
+	if err != nil {
+		return err
+	}
+
+	accessKey, err := az.GetStorageAccessKey(storageAccount)
+	if err != nil {
+		return err
+	}
+
+	createContainerArgs := []string{
+		"storage",
+		"container",
+		"create",
+		"-n",
+		bucketName,
+		"--account-name",
+		storageAccount,
+		"--fail-on-exist",
+		"--account-key",
+		accessKey,
+	}
+
+	cmdResult, err := az.azureCLI(createContainerArgs...)
+
+	if err != nil {
+		log.Logger().Infof("Error creating bucket: %s, %s", cmdResult, err)
+		return err
+	}
+
+	return nil
+}
+
+func (az *AzureRunner) GetStorageAccessKey(storageAccount string) (string, error) {
+	getStorageAccessKeyArgs := []string{
+		"storage",
+		"account",
+		"keys",
+		"list",
+		"-n",
+		storageAccount,
+		"--query",
+		"[?keyName=='key1'].value | [0]",
+	}
+
+	cmdResult, err := az.azureCLI(getStorageAccessKeyArgs...)
+
+	if err != nil {
+		return "", err
+	}
+
+	return cmdResult, nil
 }
